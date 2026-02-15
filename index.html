@@ -658,9 +658,6 @@
                     <button class="control-btn" id="syncNowBtn" title="Синхронизировать сейчас">
                         <i class="fas fa-sync-alt"></i> Синхр.
                     </button>
-                    <button class="control-btn secondary" id="forceSyncBtn" title="Принудительная синхронизация">
-                        <i class="fas fa-sync-alt"></i> Force Sync
-                    </button>
                 </div>
                 
                 <div class="sync-status" id="syncStatus">
@@ -750,7 +747,6 @@
         const nativeVideo = document.getElementById('nativeVideo');
         const currentVideoTitle = document.getElementById('currentVideoTitle');
         const syncNowBtn = document.getElementById('syncNowBtn');
-        const forceSyncBtn = document.getElementById('forceSyncBtn');
         const syncStatus = document.getElementById('syncStatus');
         const syncProgress = document.getElementById('syncProgress');
         const chatMessages = document.getElementById('chatMessages');
@@ -793,256 +789,153 @@
             }
         }
 
-        // ==================== ИСПРАВЛЕННАЯ ФУНКЦИЯ ЗАГРУЗКИ ВИДЕО ====================
-        function loadVideo(url, title = '') {
-            const videoData = parseVideoUrl(url);
-            if (!videoData) {
-                alert('Неподдерживаемая ссылка');
-                return false;
-            }
-
-            currentVideoData = videoData;
-
-            // Очищаем предыдущие плееры
-            if (videoElement) {
-                videoElement.pause();
-                videoElement.src = '';
-            }
-            if (rutubePlayer) rutubePlayer = null;
-            if (vkPlayer) vkPlayer = null;
-
-            // Выбираем тип плеера на основе данных
-            if (videoData.type === 'direct') {
-                // Нативное видео - используем HTML5 video API
-                videoPlayer.style.display = 'none';
-                nativePlayer.style.display = 'block';
-                nativeVideo.src = videoData.embedUrl;
-                nativeVideo.load();
-                videoElement = nativeVideo;
-                setupNativeVideoListeners();
-                
-            } else if (videoData.type === 'rutube' && videoData.apiAvailable) {
-                // Rutube с полноценным API
-                nativePlayer.style.display = 'none';
-                videoPlayer.style.display = 'block';
-                videoPlayer.src = videoData.embedUrl;
-                videoElement = null;
-                setupRutubePlayer(videoData.videoId);
-                
-            } else if (videoData.type === 'vk') {
-                // VK плеер
-                nativePlayer.style.display = 'none';
-                videoPlayer.style.display = 'block';
-                videoPlayer.src = videoData.embedUrl;
-                videoElement = null;
-                setupVKPlayer(videoData.videoId);
-                
-            } else {
-                // Обычный iframe для остальных
-                nativePlayer.style.display = 'none';
-                videoPlayer.style.display = 'block';
-                videoPlayer.src = videoData.embedUrl;
-                videoElement = null;
-            }
-
-            currentVideoTitle.textContent = title || videoData.title || 'Видео';
-
-            // 🔥 ВАЖНО: Отправляем состояние видео в Firebase
-            if (currentUser.roomId && videoStateRef) {
-                videoStateRef.update({
-                    url: url,
-                    embedUrl: videoData.embedUrl,
-                    title: currentVideoTitle.textContent,
-                    type: videoData.type,
-                    isDirect: videoData.isDirect || false,
-                    videoId: videoData.videoId || null,
-                    apiAvailable: videoData.apiAvailable || false,
-                    isPlaying: false,
-                    currentTime: 0,
-                    command: 'load', // Добавляем команду загрузки
-                    updatedBy: currentUser.id,
-                    timestamp: firebase.database.ServerValue.TIMESTAMP
-                }).then(() => {
-                    console.log('✅ Видео загружено, состояние отправлено в Firebase');
-                });
-            }
-
-            addChatMessage('Система', `🎬 Загружено: ${currentVideoTitle.textContent} (${videoData.type})`, 'system');
-            return true;
+        // ==================== ИСПРАВЛЕННАЯ ФУНКЦИЯ ПРИМЕНЕНИЯ КОМАНД ВИДЕО ====================
+        function applyVideoCommand(videoData) {
+    if (!videoElement) return;
+    
+    console.log(`🎬 Применяю команду: ${videoData.command || 'sync'}, время: ${videoData.currentTime}`);
+    
+    // Сохраняем текущее состояние воспроизведения
+    const wasPaused = videoElement.paused;
+    
+    // Сначала перематываем, если нужно
+    if (videoData.currentTime !== undefined) {
+        const timeDiff = Math.abs(videoElement.currentTime - videoData.currentTime);
+        if (videoData.command === 'seek' || timeDiff > 1) {
+            videoElement.currentTime = videoData.currentTime;
         }
+    }
+    
+    // Потом меняем состояние воспроизведения
+    if (videoData.command === 'play' || (videoData.isPlaying && wasPaused)) {
+        videoElement.play().catch(e => console.log('Ошибка воспроизведения:', e));
+    } else if (videoData.command === 'pause' || (!videoData.isPlaying && !wasPaused)) {
+        videoElement.pause();
+    }
+    
+    showSyncStatus(true, true);
+}
 
-        // ==================== ИСПРАВЛЕННАЯ ФУНКЦИЯ СИНХРОНИЗАЦИИ ВИДЕО ====================
+        // ==================== ИСПРАВЛЕННАЯ ФУНКЦИЯ СИНХРОНИЗАЦИИ ====================
         function syncVideoState(videoData) {
-            if (!videoElement && !videoPlayer) return;
-            
-            // КРИТИЧЕСКИ ВАЖНО: игнорируем свои команды!
-            if (videoData.updatedBy === currentUser.id) {
-                console.log('🔄 Игнорирую свою команду (она от меня)');
-                return;
-            }
-            
-            console.log(`🎬 Получена команда от ${videoData.updatedBy}:`, videoData);
-            
-            // Если это команда загрузки видео
-            if (videoData.command === 'load' && videoData.url && (!currentVideoData || currentVideoData.url !== videoData.url)) {
-                console.log('📺 Загружаю видео по команде хоста');
-                loadVideo(videoData.url, videoData.title);
-                return;
-            }
-            
-            // Для нативного плеера
-            if (videoElement) {
-                // Применяем команду
-                if (videoData.command === 'play' && videoElement.paused) {
-                    console.log('▶️ Выполняю команду play');
-                    videoElement.play().catch(e => console.log('Ошибка воспроизведения:', e));
-                } 
-                else if (videoData.command === 'pause' && !videoElement.paused) {
-                    console.log('⏸️ Выполняю команду pause');
-                    videoElement.pause();
-                }
-                else if (videoData.command === 'seek' || videoData.currentTime !== undefined) {
-                    const timeDiff = Math.abs(videoElement.currentTime - videoData.currentTime);
-                    if (timeDiff > 1) { // Если расхождение больше 1 секунды
-                        console.log(`⏪ Выполняю команду seek на ${videoData.currentTime}с`);
-                        videoElement.currentTime = videoData.currentTime;
-                    }
-                }
-                
-                // Синхронизируем состояние воспроизведения
-                if (videoData.isPlaying !== undefined) {
-                    if (videoData.isPlaying && videoElement.paused) {
-                        videoElement.play().catch(e => console.log('Ошибка воспроизведения:', e));
-                    } else if (!videoData.isPlaying && !videoElement.paused) {
-                        videoElement.pause();
-                    }
-                }
-            }
-            
-            showSyncStatus(true, true);
+    if (!videoElement || !videoData) return;
+    
+    // КРИТИЧЕСКИ ВАЖНО: игнорируем свои команды!
+    if (videoData.updatedBy === currentUser.id) {
+        console.log('🔄 Игнорирую свою команду (она от меня)');
+        return;
+    }
+    
+    // Применяем команду от другого пользователя
+    console.log(`🎬 Применяю команду от ${videoData.updatedBy}: ${videoData.command || 'sync'}`);
+    applyVideoCommand(videoData);
+}
+
+// ==================== ИСПРАВЛЕННЫЙ НАТИВНЫЙ ВИДЕО ПЛЕЕР ====================
+function setupNativeVideoListeners() {
+    if (!videoElement) return;
+
+    let seekTimeout;
+    let isInternalChange = false; // Флаг для внутренних изменений
+
+    // Пауза
+    videoElement.addEventListener('pause', () => {
+        if (!currentUser.roomId || !videoStateRef) return;
+        if (isInternalChange) {
+            isInternalChange = false;
+            return;
         }
+        
+        console.log('⏸️ Пользователь нажал паузу, отправляю в Firebase');
+        videoStateRef.update({
+            command: 'pause',
+            isPlaying: false,
+            currentTime: videoElement.currentTime,
+            updatedBy: currentUser.id,
+            timestamp: firebase.database.ServerValue.TIMESTAMP
+        });
+    });
 
-        // ==================== ИСПРАВЛЕННЫЙ НАТИВНЫЙ ВИДЕО ПЛЕЕР ====================
-        function setupNativeVideoListeners() {
-            if (!videoElement) return;
-
-            let seekTimeout;
-            let isInternalChange = false;
-
-            // Пауза
-            videoElement.addEventListener('pause', () => {
-                if (!currentUser.roomId || !videoStateRef) return;
-                if (isInternalChange) {
-                    isInternalChange = false;
-                    return;
-                }
-                
-                console.log('⏸️ Отправляю команду pause в Firebase');
-                videoStateRef.update({
-                    command: 'pause',
-                    isPlaying: false,
-                    currentTime: videoElement.currentTime,
-                    updatedBy: currentUser.id,
-                    timestamp: firebase.database.ServerValue.TIMESTAMP
-                });
-            });
-
-            // Воспроизведение
-            videoElement.addEventListener('play', () => {
-                if (!currentUser.roomId || !videoStateRef) return;
-                if (isInternalChange) {
-                    isInternalChange = false;
-                    return;
-                }
-                
-                console.log('▶️ Отправляю команду play в Firebase');
-                videoStateRef.update({
-                    command: 'play',
-                    isPlaying: true,
-                    currentTime: videoElement.currentTime,
-                    updatedBy: currentUser.id,
-                    timestamp: firebase.database.ServerValue.TIMESTAMP
-                });
-            });
-
-            // Перемотка
-            videoElement.addEventListener('seeked', () => {
-                if (!currentUser.roomId || !videoStateRef) return;
-                if (isInternalChange) {
-                    isInternalChange = false;
-                    return;
-                }
-                
-                clearTimeout(seekTimeout);
-                seekTimeout = setTimeout(() => {
-                    console.log(`⏪ Отправляю команду seek на ${videoElement.currentTime}с`);
-                    videoStateRef.update({
-                        command: 'seek',
-                        currentTime: videoElement.currentTime,
-                        isPlaying: !videoElement.paused,
-                        updatedBy: currentUser.id,
-                        timestamp: firebase.database.ServerValue.TIMESTAMP
-                    });
-                }, 300);
-            });
-
-            // Прогресс бар
-            videoElement.addEventListener('timeupdate', () => {
-                if (!videoElement) return;
-                const percent = (videoElement.currentTime / videoElement.duration) * 100;
-                updateSyncProgress(percent);
-            });
-
-            // Перехватываем методы для внутренних изменений
-            const originalPlay = videoElement.play;
-            const originalPause = videoElement.pause;
-            
-            videoElement.play = function() {
-                if (currentUser.roomId) {
-                    isInternalChange = true;
-                }
-                return originalPlay.call(this);
-            };
-            
-            videoElement.pause = function() {
-                if (currentUser.roomId) {
-                    isInternalChange = true;
-                }
-                return originalPause.call(this);
-            };
-            
-            // Перехватываем установку currentTime
-            const descriptor = Object.getOwnPropertyDescriptor(HTMLMediaElement.prototype, 'currentTime');
-            Object.defineProperty(videoElement, 'currentTime', {
-                get: function() {
-                    return descriptor.get.call(this);
-                },
-                set: function(value) {
-                    if (currentUser.roomId) {
-                        isInternalChange = true;
-                    }
-                    descriptor.set.call(this, value);
-                }
-            });
-
-            // Периодическое обновление (только фоновое состояние, без команд)
-            if (syncInterval) clearInterval(syncInterval);
-            syncInterval = setInterval(() => {
-                if (videoElement && currentUser.roomId && videoStateRef) {
-                    // Проверяем, не было ли недавно команд
-                    const now = Date.now();
-                    if (!lastCommandTime || now - lastCommandTime > 3000) {
-                        // Отправляем только состояние, без команды
-                        videoStateRef.update({
-                            currentTime: videoElement.currentTime,
-                            isPlaying: !videoElement.paused,
-                            updatedBy: currentUser.id,
-                            lastUpdate: firebase.database.ServerValue.TIMESTAMP
-                        });
-                    }
-                }
-            }, 5000);
+    // Воспроизведение
+    videoElement.addEventListener('play', () => {
+        if (!currentUser.roomId || !videoStateRef) return;
+        if (isInternalChange) {
+            isInternalChange = false;
+            return;
         }
+        
+        console.log('▶️ Пользователь нажал play, отправляю в Firebase');
+        videoStateRef.update({
+            command: 'play',
+            isPlaying: true,
+            currentTime: videoElement.currentTime,
+            updatedBy: currentUser.id,
+            timestamp: firebase.database.ServerValue.TIMESTAMP
+        });
+    });
+
+    // Перемотка
+    videoElement.addEventListener('seeked', () => {
+        if (!currentUser.roomId || !videoStateRef) return;
+        if (isInternalChange) {
+            isInternalChange = false;
+            return;
+        }
+        
+        clearTimeout(seekTimeout);
+        seekTimeout = setTimeout(() => {
+            console.log(`⏪ Пользователь перемотал на ${videoElement.currentTime}с, отправляю в Firebase`);
+            videoStateRef.update({
+                command: 'seek',
+                currentTime: videoElement.currentTime,
+                updatedBy: currentUser.id,
+                timestamp: firebase.database.ServerValue.TIMESTAMP
+            });
+        }, 300);
+    });
+
+    // Прогресс бар
+    videoElement.addEventListener('timeupdate', () => {
+        if (!videoElement) return;
+        const percent = (videoElement.currentTime / videoElement.duration) * 100;
+        updateSyncProgress(percent);
+    });
+
+    // Переопределяем методы для внутренних изменений
+    const originalPlay = videoElement.play;
+    const originalPause = videoElement.pause;
+    const originalCurrentTime = Object.getOwnPropertyDescriptor(HTMLMediaElement.prototype, 'currentTime');
+    
+    videoElement.play = function() {
+        if (!currentUser.roomId) {
+            return originalPlay.call(this);
+        }
+        isInternalChange = true;
+        return originalPlay.call(this);
+    };
+    
+    videoElement.pause = function() {
+        if (!currentUser.roomId) {
+            return originalPause.call(this);
+        }
+        isInternalChange = true;
+        return originalPause.call(this);
+    };
+    
+    // Перехватываем установку currentTime
+    Object.defineProperty(videoElement, 'currentTime', {
+        get: function() {
+            return originalCurrentTime.get.call(this);
+        },
+        set: function(value) {
+            if (currentUser.roomId) {
+                isInternalChange = true;
+            }
+            originalCurrentTime.set.call(this, value);
+        }
+    });
+}
+
 
         // ==================== НОВАЯ ФУНКЦИЯ ПЕРИОДИЧЕСКОЙ ПРОВЕРКИ ====================
         function startPeriodicSyncCheck() {
@@ -1062,67 +955,33 @@
             }, SYNC_CHECK_INTERVAL);
         }
 
-        // ==================== ИСПРАВЛЕННАЯ ФУНКЦИЯ ПРОВЕРКИ РАСХОЖДЕНИЙ ====================
+        // НОВАЯ ФУНКЦИЯ ПРОВЕРКИ РАСХОЖДЕНИЙ
         function checkAndSyncWithHost(hostData) {
             if (!videoElement) return;
             
             const currentTime = videoElement.currentTime;
             const timeDiff = Math.abs(currentTime - hostData.currentTime);
             
-            console.log(`📊 Проверка синхронизации: текущее ${currentTime.toFixed(1)}с, хост ${hostData.currentTime.toFixed(1)}с, разница ${timeDiff.toFixed(1)}с`);
+            console.log(`Проверка синхронизации: текущее ${currentTime.toFixed(1)}с, хост ${hostData.currentTime.toFixed(1)}с, разница ${timeDiff.toFixed(1)}с`);
             
             // Если расхождение больше допустимого (5 секунд)
             if (timeDiff > SYNC_TOLERANCE) {
                 console.log(`❗ Расхождение ${timeDiff.toFixed(1)}с > ${SYNC_TOLERANCE}с, синхронизируюсь`);
                 
+                // Показываем уведомление
                 showSyncStatus(true, false);
                 
-                // Отправляем команду на синхронизацию
-                if (videoStateRef) {
-                    videoStateRef.update({
-                        command: 'sync',
-                        currentTime: hostData.currentTime,
-                        isPlaying: hostData.isPlaying,
-                        updatedBy: 'system',
-                        timestamp: firebase.database.ServerValue.TIMESTAMP
-                    });
-                }
+                // Плавная синхронизация
+                gentleSync(hostData.currentTime, hostData.isPlaying);
                 
-                // Применяем синхронизацию
-                if (Math.abs(videoElement.currentTime - hostData.currentTime) > 1) {
-                    videoElement.currentTime = hostData.currentTime;
-                }
-                
-                if (hostData.isPlaying && videoElement.paused) {
-                    videoElement.play().catch(e => console.log('Ошибка воспроизведения:', e));
-                } else if (!hostData.isPlaying && !videoElement.paused) {
-                    videoElement.pause();
-                }
-                
+                // Автоматически скрываем статус через 3 секунды
                 setTimeout(() => showSyncStatus(false), 3000);
             } else {
                 console.log(`✅ Расхождение ${timeDiff.toFixed(1)}с в пределах нормы`);
             }
         }
 
-        // ==================== НОВАЯ ФУНКЦИЯ ПРИНУДИТЕЛЬНОЙ СИНХРОНИЗАЦИИ ====================
-        function forceSync() {
-            if (!currentUser.roomId || !videoElement || !videoStateRef) return;
-            
-            console.log('🔄 Принудительная синхронизация');
-            
-            videoStateRef.update({
-                command: 'force_sync',
-                currentTime: videoElement.currentTime,
-                isPlaying: !videoElement.paused,
-                updatedBy: currentUser.id,
-                timestamp: firebase.database.ServerValue.TIMESTAMP
-            });
-            
-            showSyncStatus(true, true);
-        }
-
-        // ==================== ФУНКЦИЯ ПЛАВНОЙ СИНХРОНИЗАЦИИ ====================
+        // НОВАЯ ФУНКЦИЯ ПЛАВНОЙ СИНХРОНИЗАЦИИ
         function gentleSync(targetTime, shouldBePlaying) {
             if (!videoElement) return;
             
@@ -1256,7 +1115,82 @@
             return null;
         }
 
-        // ==================== RUTUBE PLAYER API ====================
+        // ==================== ЗАГРУЗКА ВИДЕО С АВТОВЫБОРОМ API ====================
+        function loadVideo(url, title = '') {
+            const videoData = parseVideoUrl(url);
+            if (!videoData) {
+                alert('Неподдерживаемая ссылка');
+                return false;
+            }
+
+            currentVideoData = videoData;
+
+            // Очищаем предыдущие плееры
+            if (videoElement) {
+                videoElement.pause();
+                videoElement.src = '';
+            }
+            if (rutubePlayer) rutubePlayer = null;
+            if (vkPlayer) vkPlayer = null;
+
+            // Выбираем тип плеера на основе данных
+            if (videoData.type === 'direct') {
+                // Нативное видео - используем HTML5 video API
+                videoPlayer.style.display = 'none';
+                nativePlayer.style.display = 'block';
+                nativeVideo.src = videoData.embedUrl;
+                nativeVideo.load();
+                videoElement = nativeVideo;
+                setupNativeVideoListeners();
+                
+            } else if (videoData.type === 'rutube' && videoData.apiAvailable) {
+                // Rutube с полноценным API
+                nativePlayer.style.display = 'none';
+                videoPlayer.style.display = 'block';
+                videoPlayer.src = videoData.embedUrl;
+                videoElement = null;
+                setupRutubePlayer(videoData.videoId);
+                
+            } else if (videoData.type === 'vk') {
+                // VK плеер
+                nativePlayer.style.display = 'none';
+                videoPlayer.style.display = 'block';
+                videoPlayer.src = videoData.embedUrl;
+                videoElement = null;
+                setupVKPlayer(videoData.videoId);
+                
+            } else {
+                // Обычный iframe для остальных
+                nativePlayer.style.display = 'none';
+                videoPlayer.style.display = 'block';
+                videoPlayer.src = videoData.embedUrl;
+                videoElement = null;
+            }
+
+            currentVideoTitle.textContent = title || videoData.title || 'Видео';
+
+            // Обновляем в Firebase
+            if (currentUser.roomId && videoStateRef) {
+                videoStateRef.update({
+                    url: url,
+                    embedUrl: videoData.embedUrl,
+                    title: currentVideoTitle.textContent,
+                    type: videoData.type,
+                    isDirect: videoData.isDirect || false,
+                    videoId: videoData.videoId || null,
+                    apiAvailable: videoData.apiAvailable || false,
+                    isPlaying: false,
+                    currentTime: 0,
+                    updatedBy: currentUser.id,
+                    updatedAt: firebase.database.ServerValue.TIMESTAMP
+                });
+            }
+
+            addChatMessage('Система', `🎬 Загружено: ${currentVideoTitle.textContent} (${videoData.type})`, 'system');
+            return true;
+        }
+
+        // ==================== RUTUBE PLAYER API (ИСПРАВЛЕННЫЙ) ====================
         function setupRutubePlayer(videoId) {
             console.log('Настройка Rutube плеера с API');
             
@@ -1360,6 +1294,82 @@
                 videoPlayer.contentWindow.postMessage({
                     type: 'getState'
                 }, '*');
+            }, 5000);
+        }
+
+        // ==================== ИСПРАВЛЕННЫЙ НАТИВНЫЙ ВИДЕО ПЛЕЕР ====================
+        function setupNativeVideoListeners() {
+            if (!videoElement) return;
+
+            let seekTimeout;
+
+            // Пауза - отправляем КОМАНДУ (убрана проверка ignoreNextEvent)
+            videoElement.addEventListener('pause', () => {
+                if (!currentUser.roomId || !videoStateRef) return;
+                
+                console.log('⏸️ Отправляю команду pause в Firebase');
+                videoStateRef.update({
+                    command: 'pause',
+                    isPlaying: false,
+                    currentTime: videoElement.currentTime,
+                    updatedBy: currentUser.id,
+                    timestamp: firebase.database.ServerValue.TIMESTAMP
+                });
+            });
+
+            // Воспроизведение - отправляем КОМАНДУ (убрана проверка ignoreNextEvent)
+            videoElement.addEventListener('play', () => {
+                if (!currentUser.roomId || !videoStateRef) return;
+                
+                console.log('▶️ Отправляю команду play в Firebase');
+                videoStateRef.update({
+                    command: 'play',
+                    isPlaying: true,
+                    currentTime: videoElement.currentTime,
+                    updatedBy: currentUser.id,
+                    timestamp: firebase.database.ServerValue.TIMESTAMP
+                });
+            });
+
+            // Перемотка - отправляем КОМАНДУ (убрана проверка ignoreNextEvent)
+            videoElement.addEventListener('seeked', () => {
+                if (!currentUser.roomId || !videoStateRef) return;
+                
+                clearTimeout(seekTimeout);
+                seekTimeout = setTimeout(() => {
+                    console.log(`⏪ Отправляю команду seek на ${videoElement.currentTime}с в Firebase`);
+                    videoStateRef.update({
+                        command: 'seek',
+                        currentTime: videoElement.currentTime,
+                        updatedBy: currentUser.id,
+                        timestamp: firebase.database.ServerValue.TIMESTAMP
+                    });
+                }, 300);
+            });
+
+            // Прогресс бар
+            videoElement.addEventListener('timeupdate', () => {
+                if (!videoElement) return;
+                const percent = (videoElement.currentTime / videoElement.duration) * 100;
+                updateSyncProgress(percent);
+            });
+
+            // Периодическое обновление (только фоновое состояние, без команд)
+            if (syncInterval) clearInterval(syncInterval);
+            syncInterval = setInterval(() => {
+                if (videoElement && currentUser.roomId && videoStateRef) {
+                    // Проверяем, не было ли недавно команд
+                    const now = Date.now();
+                    if (!lastCommandTime || now - lastCommandTime > 3000) {
+                        // Отправляем только состояние, без команды
+                        videoStateRef.update({
+                            currentTime: videoElement.currentTime,
+                            isPlaying: !videoElement.paused,
+                            updatedBy: currentUser.id,
+                            lastUpdate: firebase.database.ServerValue.TIMESTAMP
+                        });
+                    }
+                }
             }, 5000);
         }
 
@@ -1539,24 +1549,21 @@
             });
 
             // ИСПРАВЛЕННЫЙ СЛУШАТЕЛЬ ВИДЕО
-            videoStateRef.on('value', (snapshot) => {
-                const videoData = snapshot.val();
-                if (!videoData) return;
-                
-                console.log('📡 Получены данные видео:', videoData);
-                
-                // Если это команда загрузки видео и мы не хост
-                if (videoData.command === 'load' && !currentUser.isHost) {
-                    if (videoData.url && (!currentVideoData || currentVideoData.url !== videoData.url)) {
-                        console.log('📺 Загружаю видео по команде хоста');
-                        loadVideo(videoData.url, videoData.title);
-                    }
-                    return;
-                }
-                
-                // Синхронизируем состояние
-                syncVideoState(videoData);
-            });
+           videoStateRef.on('value', (snapshot) => {
+    const videoData = snapshot.val();
+    if (!videoData) return;
+    
+    console.log('📡 Получены данные видео:', videoData);
+    
+    // Загружаем видео, если его еще нет
+    if (videoData.url && (!currentVideoTitle.textContent || currentVideoTitle.textContent === 'Вставьте ссылку на видео')) {
+        loadVideo(videoData.url, videoData.title);
+        return;
+    }
+    
+    // Синхронизируем состояние (игнорируем свои команды внутри функции)
+    syncVideoState(videoData);
+});
 
             // Слушаем чат
             chatRef.limitToLast(50).on('child_added', (snapshot) => {
@@ -1685,8 +1692,6 @@
                 showSyncStatus(true);
             }
         });
-
-        forceSyncBtn.addEventListener('click', forceSync);
 
         // Чат
         sendMessageBtn.addEventListener('click', () => {
