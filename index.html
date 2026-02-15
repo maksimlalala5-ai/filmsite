@@ -791,50 +791,151 @@
 
         // ==================== ИСПРАВЛЕННАЯ ФУНКЦИЯ ПРИМЕНЕНИЯ КОМАНД ВИДЕО ====================
         function applyVideoCommand(videoData) {
-            if (!videoElement) return;
-            
-            console.log(`🎬 Применяю команду: ${videoData.command || 'sync'}, время: ${videoData.currentTime}`);
-            
-            // Важно: проверяем наличие currentTime
-            if (videoData.currentTime !== undefined) {
-                // Если команда seek или расхождение больше 1 секунды
-                if (videoData.command === 'seek' || Math.abs(videoElement.currentTime - videoData.currentTime) > 1) {
-                    videoElement.currentTime = videoData.currentTime;
-                }
-            }
-            
-            // Затем обрабатываем воспроизведение/паузу
-            if (videoData.command === 'play' || (videoData.isPlaying && videoElement.paused)) {
-                videoElement.play().catch(e => console.log('Ошибка воспроизведения:', e));
-            } else if (videoData.command === 'pause' || (!videoData.isPlaying && !videoElement.paused)) {
-                videoElement.pause();
-            }
-            
-            // Показываем статус синхронизации
-            showSyncStatus(true, true);
+    if (!videoElement) return;
+    
+    console.log(`🎬 Применяю команду: ${videoData.command || 'sync'}, время: ${videoData.currentTime}`);
+    
+    // Сохраняем текущее состояние воспроизведения
+    const wasPaused = videoElement.paused;
+    
+    // Сначала перематываем, если нужно
+    if (videoData.currentTime !== undefined) {
+        const timeDiff = Math.abs(videoElement.currentTime - videoData.currentTime);
+        if (videoData.command === 'seek' || timeDiff > 1) {
+            videoElement.currentTime = videoData.currentTime;
         }
+    }
+    
+    // Потом меняем состояние воспроизведения
+    if (videoData.command === 'play' || (videoData.isPlaying && wasPaused)) {
+        videoElement.play().catch(e => console.log('Ошибка воспроизведения:', e));
+    } else if (videoData.command === 'pause' || (!videoData.isPlaying && !wasPaused)) {
+        videoElement.pause();
+    }
+    
+    showSyncStatus(true, true);
+}
 
         // ==================== ИСПРАВЛЕННАЯ ФУНКЦИЯ СИНХРОНИЗАЦИИ ====================
         function syncVideoState(videoData) {
-            if (!videoElement || !videoData) return;
-            
-            // КРИТИЧЕСКИ ВАЖНО: игнорируем свои команды!
-            if (videoData.updatedBy === currentUser.id) {
-                console.log('🔄 Игнорирую свою команду');
-                return;
-            }
-            
-            // Проверяем, свежие ли данные (менее 5 секунд)
-            const now = Date.now();
-            const isFreshCommand = videoData.timestamp && 
-                                  (now - videoData.timestamp) < 10000; // Увеличил до 10 секунд
-            
-            // Применяем команды, если они есть
-            if (videoData.command || isFreshCommand) {
-                console.log(`🎬 Применяю действие от ${videoData.updatedBy || 'unknown'}: ${videoData.command || 'sync'}`);
-                applyVideoCommand(videoData);
-            }
+    if (!videoElement || !videoData) return;
+    
+    // КРИТИЧЕСКИ ВАЖНО: игнорируем свои команды!
+    if (videoData.updatedBy === currentUser.id) {
+        console.log('🔄 Игнорирую свою команду (она от меня)');
+        return;
+    }
+    
+    // Применяем команду от другого пользователя
+    console.log(`🎬 Применяю команду от ${videoData.updatedBy}: ${videoData.command || 'sync'}`);
+    applyVideoCommand(videoData);
+}
+
+// ==================== ИСПРАВЛЕННЫЙ НАТИВНЫЙ ВИДЕО ПЛЕЕР ====================
+function setupNativeVideoListeners() {
+    if (!videoElement) return;
+
+    let seekTimeout;
+    let isInternalChange = false; // Флаг для внутренних изменений
+
+    // Пауза
+    videoElement.addEventListener('pause', () => {
+        if (!currentUser.roomId || !videoStateRef) return;
+        if (isInternalChange) {
+            isInternalChange = false;
+            return;
         }
+        
+        console.log('⏸️ Пользователь нажал паузу, отправляю в Firebase');
+        videoStateRef.update({
+            command: 'pause',
+            isPlaying: false,
+            currentTime: videoElement.currentTime,
+            updatedBy: currentUser.id,
+            timestamp: firebase.database.ServerValue.TIMESTAMP
+        });
+    });
+
+    // Воспроизведение
+    videoElement.addEventListener('play', () => {
+        if (!currentUser.roomId || !videoStateRef) return;
+        if (isInternalChange) {
+            isInternalChange = false;
+            return;
+        }
+        
+        console.log('▶️ Пользователь нажал play, отправляю в Firebase');
+        videoStateRef.update({
+            command: 'play',
+            isPlaying: true,
+            currentTime: videoElement.currentTime,
+            updatedBy: currentUser.id,
+            timestamp: firebase.database.ServerValue.TIMESTAMP
+        });
+    });
+
+    // Перемотка
+    videoElement.addEventListener('seeked', () => {
+        if (!currentUser.roomId || !videoStateRef) return;
+        if (isInternalChange) {
+            isInternalChange = false;
+            return;
+        }
+        
+        clearTimeout(seekTimeout);
+        seekTimeout = setTimeout(() => {
+            console.log(`⏪ Пользователь перемотал на ${videoElement.currentTime}с, отправляю в Firebase`);
+            videoStateRef.update({
+                command: 'seek',
+                currentTime: videoElement.currentTime,
+                updatedBy: currentUser.id,
+                timestamp: firebase.database.ServerValue.TIMESTAMP
+            });
+        }, 300);
+    });
+
+    // Прогресс бар
+    videoElement.addEventListener('timeupdate', () => {
+        if (!videoElement) return;
+        const percent = (videoElement.currentTime / videoElement.duration) * 100;
+        updateSyncProgress(percent);
+    });
+
+    // Переопределяем методы для внутренних изменений
+    const originalPlay = videoElement.play;
+    const originalPause = videoElement.pause;
+    const originalCurrentTime = Object.getOwnPropertyDescriptor(HTMLMediaElement.prototype, 'currentTime');
+    
+    videoElement.play = function() {
+        if (!currentUser.roomId) {
+            return originalPlay.call(this);
+        }
+        isInternalChange = true;
+        return originalPlay.call(this);
+    };
+    
+    videoElement.pause = function() {
+        if (!currentUser.roomId) {
+            return originalPause.call(this);
+        }
+        isInternalChange = true;
+        return originalPause.call(this);
+    };
+    
+    // Перехватываем установку currentTime
+    Object.defineProperty(videoElement, 'currentTime', {
+        get: function() {
+            return originalCurrentTime.get.call(this);
+        },
+        set: function(value) {
+            if (currentUser.roomId) {
+                isInternalChange = true;
+            }
+            originalCurrentTime.set.call(this, value);
+        }
+    });
+}
+
 
         // ==================== НОВАЯ ФУНКЦИЯ ПЕРИОДИЧЕСКОЙ ПРОВЕРКИ ====================
         function startPeriodicSyncCheck() {
@@ -1448,21 +1549,21 @@
             });
 
             // ИСПРАВЛЕННЫЙ СЛУШАТЕЛЬ ВИДЕО
-            videoStateRef.on('value', (snapshot) => {
-                const videoData = snapshot.val();
-                if (!videoData) return;
-                
-                console.log('📡 Изменение в Firebase:', videoData);
-                
-                // Загружаем видео, если его еще нет
-                if (videoData.url && (!currentVideoTitle.textContent || currentVideoTitle.textContent === 'Вставьте ссылку на видео')) {
-                    loadVideo(videoData.url, videoData.title);
-                    return;
-                }
-                
-                // Синхронизируем состояние видео (игнорируем свои команды внутри syncVideoState)
-                syncVideoState(videoData);
-            });
+           videoStateRef.on('value', (snapshot) => {
+    const videoData = snapshot.val();
+    if (!videoData) return;
+    
+    console.log('📡 Получены данные видео:', videoData);
+    
+    // Загружаем видео, если его еще нет
+    if (videoData.url && (!currentVideoTitle.textContent || currentVideoTitle.textContent === 'Вставьте ссылку на видео')) {
+        loadVideo(videoData.url, videoData.title);
+        return;
+    }
+    
+    // Синхронизируем состояние (игнорируем свои команды внутри функции)
+    syncVideoState(videoData);
+});
 
             // Слушаем чат
             chatRef.limitToLast(50).on('child_added', (snapshot) => {
