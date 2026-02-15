@@ -717,6 +717,12 @@
         let syncInterval = null;
         let currentVideoData = null;
         
+        // НОВЫЕ ПЕРЕМЕННЫЕ ДЛЯ ПЕРИОДИЧЕСКОЙ СИНХРОНИЗАЦИИ
+        let syncCheckInterval = null;
+        const SYNC_CHECK_INTERVAL = 15000; // 15 секунд
+        const SYNC_TOLERANCE = 5; // допустимое расхождение 5 секунд
+        let lastSyncCheck = 0;
+        
         // Специфичные для плееров переменные
         let rutubePlayer = null;
         let vkPlayer = null;
@@ -780,6 +786,93 @@
                 statusIndicator.className = 'status-indicator status-disconnected';
                 statusText.textContent = 'Нет подключения';
             }
+        }
+
+        // ==================== НОВАЯ ФУНКЦИЯ ПЕРИОДИЧЕСКОЙ ПРОВЕРКИ ====================
+        function startPeriodicSyncCheck() {
+            if (syncCheckInterval) clearInterval(syncCheckInterval);
+            
+            syncCheckInterval = setInterval(() => {
+                if (!currentUser.roomId || !videoElement || !videoStateRef || currentUser.isHost) return;
+                
+                // Запрашиваем текущее состояние у Firebase
+                videoStateRef.once('value').then((snapshot) => {
+                    const hostVideoData = snapshot.val();
+                    if (!hostVideoData) return;
+                    
+                    // Проверяем, не обновляли ли мы сами это состояние
+                    if (hostVideoData.updatedBy === currentUser.id) return;
+                    
+                    // Проверяем расхождение с хостом
+                    checkAndSyncWithHost(hostVideoData);
+                });
+            }, SYNC_CHECK_INTERVAL);
+        }
+
+        // НОВАЯ ФУНКЦИЯ ПРОВЕРКИ РАСХОЖДЕНИЙ
+        function checkAndSyncWithHost(hostData) {
+            if (!videoElement) return;
+            
+            const currentTime = videoElement.currentTime;
+            const timeDiff = Math.abs(currentTime - hostData.currentTime);
+            
+            console.log(`Проверка синхронизации: текущее ${currentTime.toFixed(1)}с, хост ${hostData.currentTime.toFixed(1)}с, разница ${timeDiff.toFixed(1)}с`);
+            
+            // Если расхождение больше допустимого (5 секунд)
+            if (timeDiff > SYNC_TOLERANCE) {
+                console.log(`❗ Расхождение ${timeDiff.toFixed(1)}с > ${SYNC_TOLERANCE}с, синхронизируюсь`);
+                
+                // Показываем уведомление
+                showSyncStatus(true, false);
+                
+                // Плавная синхронизация
+                gentleSync(hostData.currentTime, hostData.isPlaying);
+                
+                // Автоматически скрываем статус через 3 секунды
+                setTimeout(() => showSyncStatus(false), 3000);
+            } else {
+                console.log(`✅ Расхождение ${timeDiff.toFixed(1)}с в пределах нормы`);
+            }
+        }
+
+        // НОВАЯ ФУНКЦИЯ ПЛАВНОЙ СИНХРОНИЗАЦИИ
+        function gentleSync(targetTime, shouldBePlaying) {
+            if (!videoElement) return;
+            
+            ignoreNextEvent = true;
+            
+            // Проверяем, достаточно ли забуферизировано для перемотки
+            const buffered = videoElement.buffered;
+            let canSeek = false;
+            
+            for (let i = 0; i < buffered.length; i++) {
+                if (targetTime >= buffered.start(i) && targetTime <= buffered.end(i)) {
+                    canSeek = true;
+                    break;
+                }
+            }
+            
+            if (canSeek) {
+                // Если целевое время уже в буфере - перематываем сразу
+                videoElement.currentTime = targetTime;
+            } else {
+                // Если не в буфере - показываем сообщение
+                addChatMessage('Система', '⏳ Догоняю поток...', 'system');
+                
+                // Пробуем перемотать и надеемся, что подгрузится
+                videoElement.currentTime = targetTime;
+            }
+            
+            // Синхронизируем воспроизведение
+            if (shouldBePlaying && videoElement.paused) {
+                videoElement.play().catch(e => console.log('Ошибка воспроизведения:', e));
+            } else if (!shouldBePlaying && !videoElement.paused) {
+                videoElement.pause();
+            }
+            
+            setTimeout(() => {
+                ignoreNextEvent = false;
+            }, 1000);
         }
 
         // ==================== УНИВЕРСАЛЬНЫЙ ПАРСИНГ ВИДЕО ====================
@@ -1105,56 +1198,38 @@
                 updateSyncProgress(percent);
             });
 
-            // Периодическая синхронизация
+            // ИЗМЕНЕННЫЙ ИНТЕРВАЛ: Хост обновляет время раз в 5 секунд
             if (syncInterval) clearInterval(syncInterval);
             syncInterval = setInterval(() => {
-                if (videoElement && !videoElement.paused && currentUser.roomId && videoStateRef) {
+                // Только хост обновляет состояние в Firebase
+                if (videoElement && currentUser.isHost && currentUser.roomId && videoStateRef) {
                     videoStateRef.update({
                         currentTime: videoElement.currentTime,
                         isPlaying: !videoElement.paused,
-                        updatedBy: currentUser.id
+                        updatedBy: currentUser.id,
+                        lastUpdate: firebase.database.ServerValue.TIMESTAMP
                     });
                 }
-            }, 2000);
+                
+                // Все обновляют прогресс бар
+                if (videoElement) {
+                    const percent = (videoElement.currentTime / videoElement.duration) * 100;
+                    updateSyncProgress(percent);
+                }
+            }, 5000); // Хост обновляет время раз в 5 секунд, а не каждые 2
         }
 
         // ==================== УНИВЕРСАЛЬНАЯ СИНХРОНИЗАЦИЯ ====================
         function syncVideoState(videoData) {
             if (!videoData || videoData.updatedBy === currentUser.id) return;
             
-            showSyncStatus(true, false);
-            ignoreNextEvent = true;
-            
-            // Синхронизация в зависимости от типа плеера
-            if (videoData.type === 'direct' && videoElement) {
-                // Нативное видео [citation:2]
-                if (Math.abs(videoElement.currentTime - videoData.currentTime) > 0.5) {
-                    videoElement.currentTime = videoData.currentTime;
-                }
-                
-                if (videoData.isPlaying && videoElement.paused) {
-                    videoElement.play();
-                } else if (!videoData.isPlaying && !videoElement.paused) {
-                    videoElement.pause();
-                }
-                
-            } else if (videoData.type === 'rutube' && videoData.apiAvailable) {
-                // Rutube с API [citation:5]
-                controlRutubePlayer('seek', videoData.currentTime);
-                
-                setTimeout(() => {
-                    if (videoData.isPlaying) {
-                        controlRutubePlayer('play');
-                    } else {
-                        controlRutubePlayer('pause');
-                    }
-                }, 100);
+            // ИЗМЕНЕНО: Хост больше НЕ синхронизируется с другими
+            if (currentUser.isHost) {
+                return; // Хост игнорирует чужие обновления
             }
             
-            setTimeout(() => {
-                ignoreNextEvent = false;
-                showSyncStatus(false);
-            }, 500);
+            // Для не-хоста показываем статус, но синхронизация будет в периодическом интервале
+            showSyncStatus(true, true);
         }
 
         // ==================== FIREBASE КОМНАТЫ ====================
@@ -1226,6 +1301,7 @@
             });
         }
 
+        // ИЗМЕНЕННАЯ ФУНКЦИЯ: добавлен запуск периодической проверки для не-хоста
         function joinRoomSuccess(roomId) {
             currentRoomIdSpan.textContent = roomId;
             roomInfo.style.display = 'flex';
@@ -1240,12 +1316,25 @@
             roomIdInput.value = '';
             
             addChatMessage('Система', currentUser.isHost ? 
-                '✅ Вы создали комнату' : 
+                '✅ Вы создали комнату (вы хост)' : 
                 '✅ Вы подключились к комнате', 'system');
+            
+            // ЗАПУСКАЕМ ПЕРИОДИЧЕСКУЮ ПРОВЕРКУ (только для не-хоста)
+            if (!currentUser.isHost) {
+                startPeriodicSyncCheck();
+                addChatMessage('Система', '⏱️ Проверка синхронизации каждые 15 секунд (допуск 5с)', 'system');
+            }
         }
 
+        // ИЗМЕНЕННАЯ ФУНКЦИЯ: добавлена очистка интервала синхронизации
         function leaveRoom() {
             if (!currentUser.roomId) return;
+            
+            // Очищаем интервал синхронизации
+            if (syncCheckInterval) {
+                clearInterval(syncCheckInterval);
+                syncCheckInterval = null;
+            }
             
             if (syncInterval) {
                 clearInterval(syncInterval);
@@ -1287,6 +1376,7 @@
             addChatMessage('Система', '👋 Вы покинули комнату', 'system');
         }
 
+        // ИЗМЕНЕННАЯ ФУНКЦИЯ: обновлен слушатель видео
         function setupRoomListeners(roomId) {
             // Слушаем пользователей
             usersRef.on('value', (snapshot) => {
@@ -1313,15 +1403,27 @@
                 }
             });
 
-            // Слушаем видео
+            // ИЗМЕНЕННЫЙ СЛУШАТЕЛЬ ВИДЕО
             videoStateRef.on('value', (snapshot) => {
                 const videoData = snapshot.val();
                 if (!videoData) return;
                 
+                // Загружаем видео, если его еще нет
                 if (videoData.url && (!currentVideoTitle.textContent || currentVideoTitle.textContent === 'Вставьте ссылку на видео')) {
                     loadVideo(videoData.url, videoData.title);
                 }
                 
+                // Хост НЕ синхронизируется с другими
+                if (currentUser.isHost) {
+                    // Просто обновляем прогресс бар
+                    if (videoElement) {
+                        const percent = (videoElement.currentTime / videoElement.duration) * 100;
+                        updateSyncProgress(percent);
+                    }
+                    return;
+                }
+                
+                // Для не-хоста вызываем синхронизацию (но она только показывает статус)
                 syncVideoState(videoData);
             });
 
